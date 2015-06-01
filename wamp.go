@@ -21,6 +21,9 @@ const (
 	msgUnsubscribe
 	msgPublish
 	msgEvent
+	msgSubscribed
+	msgSubscribeError
+	msgHeartbeat = 20
 )
 
 const wampProtocolVersion = 1
@@ -59,8 +62,8 @@ func parseMessageType(msg string) int {
 }
 
 func messageTypeString(typ int) string {
-	types := []string{"WELCOME", "PREFIX", "CALL", "CALLRESULT", "CALLERROR", "SUBSCRIBE", "UNSUBSCRIBE", "PUBLISH", "EVENT"}
-	if typ >= 0 && typ < 9 {
+	types := []string{"WELCOME", "PREFIX", "CALL", "CALLRESULT", "CALLERROR", "SUBSCRIBE", "UNSUBSCRIBE", "PUBLISH", "EVENT", "SUBSCRIBED", "SUBSCRIBEERROR"}
+	if typ >= 0 && typ < 11 {
 		return types[typ]
 	}
 	return ""
@@ -248,7 +251,7 @@ func (msg *callErrorMsg) UnmarshalJSON(jsonData []byte) error {
 // a URI identifying the error, errorDesc is a human-readable description of the
 // error (for developers), errorDetails, if present, is a non-nil object
 func createCallError(callID, errorURI, errorDesc string, errorDetails ...interface{}) (string, error) {
-	if _, err := url.ParseRequestURI(errorURI); err != nil {
+	if _, err := url.Parse(errorURI); err != nil {
 		return "", &WAMPError{"invalid URI: " + errorURI}
 	}
 	var data []interface{}
@@ -409,10 +412,16 @@ func createEvent(topicURI string, event interface{}) (string, error) {
 	return createWAMPMessagePubSub(msgEvent, topicURI, event)
 }
 
+// Event returns a json encoded WAMP 'HEARTBEAT' message as a byte slice
+func createHeartbeatEvent(counter int) (string, error) {
+	return createWAMPMessage(msgHeartbeat, counter)
+}
+
+
 // createWAMPMessagePubSub checks that the second argument (topicURI) is a valid
 // URI and then passes the request on to createWAMPMessage
 func createWAMPMessagePubSub(args ...interface{}) (string, error) {
-	if _, err := url.ParseRequestURI(args[1].(string)); err != nil {
+	if _, err := url.Parse(args[1].(string)); err != nil {
 		return "", &WAMPError{"invalid URI: " + args[1].(string)}
 	}
 	return createWAMPMessage(args...)

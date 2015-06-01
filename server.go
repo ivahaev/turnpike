@@ -5,14 +5,14 @@
 package turnpike
 
 import (
-	"code.google.com/p/go.net/websocket"
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/websocket"
+	log "github.com/ivahaev/go-logger"
 	"github.com/nu7hatch/gouuid"
 	"io"
-	"log"
 	"net"
-	"net/http"
+	//	"net/http"
 	"sync"
 	"time"
 )
@@ -38,10 +38,10 @@ type Server struct {
 	subHandlers map[string]SubHandler
 	pubHandlers map[string]PubHandler
 	// Topic URI -> subscribed clients
-	subscriptions       map[string]listenerMap
-	subLock             *sync.Mutex
-	sessionOpenCallback func(string)
-	websocket.Server
+	subscriptions        map[string]listenerMap
+	subLock              *sync.Mutex
+	sessionOpenCallback  func(string, interface{})
+	sessionCloseCallback func(string)
 }
 
 // RPCHandler is an interface that handlers to RPC calls should implement.
@@ -85,16 +85,19 @@ func NewServer() *Server {
 		subscriptions: make(map[string]listenerMap),
 		subLock:       new(sync.Mutex),
 	}
-	s.Server = websocket.Server{
-		Handshake: checkWAMPHandshake,
-		Handler:   websocket.Handler(s.HandleWebsocket),
-	}
 	return s
 }
 
-// SetSessionOpenCallback adds a callback function that is run when a new session begins.
+// SetSessionCloseCallback adds a callback function that is run when a session ends.
 // The callback function must accept a string argument that is the session ID.
-func (t *Server) SetSessionOpenCallback(f func(string)) {
+func (t *Server) SetSessionCloseCallback(f func(string)) {
+	t.sessionCloseCallback = f
+}
+
+// SetSessionOpenCallback adds a callback function that is run when a new session begins.
+// The callback function must accept a string argument that is the session ID
+// and the interface{} argument with additional info
+func (t *Server) SetSessionOpenCallback(f func(string, interface{})) {
 	t.sessionOpenCallback = f
 }
 
@@ -156,39 +159,39 @@ func (t *Server) ConnectedClients() []string {
 }
 
 // HandleWebsocket implements the go.net/websocket.Handler interface.
-func (t *Server) HandleWebsocket(conn *websocket.Conn) {
+func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{}) {
 	defer conn.Close()
 
 	if debug {
-		log.Print("turnpike: received websocket connection")
+		log.Info("turnpike: received websocket connection")
 	}
 
 	tid, err := uuid.NewV4()
 	if err != nil {
 		if debug {
-			log.Print("turnpike: could not create unique id, refusing client connection")
+			log.Info("turnpike: could not create unique id, refusing client connection")
 		}
 		return
 	}
 	id := tid.String()
 	if debug {
-		log.Printf("turnpike: client connected: %s", id)
+		log.Info("turnpike: client connected:", id)
 	}
 
 	arr, err := createWelcome(id, turnpikeServerIdent)
 	if err != nil {
 		if debug {
-			log.Print("turnpike: error encoding welcome message")
+			log.Info("turnpike: error encoding welcome message")
 		}
 		return
 	}
 	if debug {
-		log.Printf("turnpike: sending welcome message: %s", arr)
+		log.Info("turnpike: sending welcome message:", arr)
 	}
-	err = websocket.Message.Send(conn, string(arr))
+	err = conn.WriteMessage(websocket.TextMessage, []byte(arr))
 	if err != nil {
 		if debug {
-			log.Printf("turnpike: error sending welcome message, aborting connection: %s", err)
+			log.Info("turnpike: error sending welcome message, aborting connection:", err)
 		}
 		return
 	}
@@ -197,52 +200,52 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 	t.clients[id] = c
 
 	if t.sessionOpenCallback != nil {
-		t.sessionOpenCallback(id)
+		t.sessionOpenCallback(id, additionalData)
 	}
-
 	failures := 0
 	go func() {
 		for msg := range c {
 			if debug {
-				log.Printf("turnpike: sending message: %s", msg)
+				log.Info("turnpike: sending message:", msg)
 			}
 			conn.SetWriteDeadline(time.Now().Add(clientConnTimeout * time.Second))
-			err := websocket.Message.Send(conn, msg)
+			err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
 			if err != nil {
 				if nErr, ok := err.(net.Error); ok && (nErr.Timeout() || nErr.Temporary()) {
-					log.Printf("Network error: %s", nErr)
+					log.Info("Network error:", nErr.Error())
 					failures++
 					if failures > clientMaxFailures {
 						break
 					}
 				} else {
 					if debug {
-						log.Printf("turnpike: error sending message: %s", err)
+						log.Info("turnpike: error sending message:", err.Error())
 					}
 					break
 				}
 			}
 		}
 		if debug {
-			log.Printf("Client %s disconnected", id)
+			log.Info("Client disconnected", id)
 		}
 		conn.Close()
 	}()
 
 	for {
 		var rec string
-		err := websocket.Message.Receive(conn, &rec)
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if err != io.EOF {
 				if debug {
-					log.Printf("turnpike: error receiving message, aborting connection: %s", err)
+					log.Info("turnpike: error receiving message, aborting connection:", err.Error())
 				}
 			}
 			break
 		}
 		if debug {
-			log.Printf("turnpike: message received: %s", rec)
+			log.Info("turnpike: message received:", rec)
 		}
+		rec = string(msg)
 
 		data := []byte(rec)
 
@@ -252,7 +255,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 			err := json.Unmarshal(data, &msg)
 			if err != nil {
 				if debug {
-					log.Printf("turnpike: error unmarshalling prefix message: %s", err)
+					log.Info("turnpike: error unmarshalling prefix message:", err.Error())
 				}
 				continue
 			}
@@ -262,7 +265,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 			err := json.Unmarshal(data, &msg)
 			if err != nil {
 				if debug {
-					log.Printf("turnpike: error unmarshalling call message: %s", err)
+					log.Info("turnpike: error unmarshalling call message:", err.Error())
 				}
 				continue
 			}
@@ -272,7 +275,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 			err := json.Unmarshal(data, &msg)
 			if err != nil {
 				if debug {
-					log.Printf("turnpike: error unmarshalling subscribe message: %s", err)
+					log.Info("turnpike: error unmarshalling subscribe message:", err.Error())
 				}
 				continue
 			}
@@ -282,7 +285,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 			err := json.Unmarshal(data, &msg)
 			if err != nil {
 				if debug {
-					log.Printf("turnpike: error unmarshalling unsubscribe message: %s", err)
+					log.Info("turnpike: error unmarshalling unsubscribe message:", err.Error())
 				}
 				continue
 			}
@@ -292,46 +295,79 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn) {
 			err := json.Unmarshal(data, &msg)
 			if err != nil {
 				if debug {
-					log.Printf("turnpike: error unmarshalling publish message: %s", err)
+					log.Info("turnpike: error unmarshalling publish message", err)
 				}
 				continue
 			}
 			t.handlePublish(id, msg)
 		case msgWelcome, msgCallResult, msgCallError, msgEvent:
 			if debug {
-				log.Printf("turnpike: server -> client message received, ignored: %s", messageTypeString(typ))
+				log.Info("turnpike: server -> client message received, ignored", messageTypeString(typ))
 			}
+		case msgHeartbeat:
+			if debug {
+				log.Info("turnpike: client -> server heartbeat message received")
+			}
+			var msg []interface{}
+			err := json.Unmarshal(data, &msg)
+			if err != nil {
+				if debug {
+					log.Info("turnpike: error unmarshalling call message:", err.Error())
+				}
+				continue
+			}
+			t.handleHeartbeat(id, msg)
 		default:
 			if debug {
-				log.Printf("turnpike: invalid message format, message dropped: %s", data)
+				log.Info("turnpike: client heartbeat message: ", data)
 			}
 		}
 	}
 
 	delete(t.clients, id)
 	close(c)
+	if t.sessionCloseCallback != nil {
+		t.sessionCloseCallback(id)
+	}
+}
+
+func (t *Server) handleHeartbeat(tid string, msg []interface{}) {
+	counter := int(msg[1].(float64))
+	out, err := createHeartbeatEvent(counter)
+	if err != nil {
+		if debug {
+			log.Info("turnpike: error creating hearbeat message:", err.Error())
+		}
+		return
+	}
+	if client, ok := t.clients[tid]; ok {
+		if len(client) == cap(client) {
+			<-client
+		}
+		client <- string(out)
+	}
 }
 
 func (t *Server) handlePrefix(id string, msg prefixMsg) {
 	if debug {
-		log.Print("turnpike: handling prefix message")
+		log.Info("turnpike: handling prefix message")
 	}
 	if _, ok := t.prefixes[id]; !ok {
 		t.prefixes[id] = make(prefixMap)
 	}
 	if err := t.prefixes[id].registerPrefix(msg.Prefix, msg.URI); err != nil {
 		if debug {
-			log.Printf("turnpike: error registering prefix: %s", err)
+			log.Info("turnpike: error registering prefix:", err.Error())
 		}
 	}
 	if debug {
-		log.Printf("turnpike: client %s registered prefix '%s' for URI: %s", id, msg.Prefix, msg.URI)
+		log.Info("turnpike: client registered prefix  for URI:", id, msg.Prefix, msg.URI)
 	}
 }
 
 func (t *Server) handleCall(id string, msg callMsg) {
 	if debug {
-		log.Print("turnpike: handling call message")
+		log.Info("turnpike: handling call message")
 	}
 
 	var out string
@@ -362,15 +398,15 @@ func (t *Server) handleCall(id string, msg callMsg) {
 		}
 	} else {
 		if debug {
-			log.Printf("turnpike: RPC call not registered: %s", msg.ProcURI)
+			log.Info("turnpike: RPC call not registered:", msg.ProcURI)
 		}
-		out, err = createCallError(msg.CallID, "error:notimplemented", "RPC call '%s' not implemented", msg.ProcURI)
+		out, err = createCallError(msg.CallID, "error:notimplemented", "RPC call not implemented", msg.ProcURI)
 	}
 
 	if err != nil {
 		// whatever, let the client hang...
 		if debug {
-			log.Printf("turnpike: error creating callError message: %s", err)
+			log.Info("turnpike: error creating callError message:", err.Error())
 		}
 		return
 	}
@@ -381,14 +417,14 @@ func (t *Server) handleCall(id string, msg callMsg) {
 
 func (t *Server) handleSubscribe(id string, msg subscribeMsg) {
 	if debug {
-		log.Print("turnpike: handling subscribe message")
+		log.Info("turnpike: handling subscribe message")
 	}
 
 	uri := checkCurie(t.prefixes[id], msg.TopicURI)
 	h := t.getSubHandler(uri)
 	if h != nil && !h(id, uri) {
 		if debug {
-			log.Printf("turnpike: client %s denied subscription of topic: %s", id, uri)
+			log.Info("turnpike: client denied subscription of topic:", id, uri)
 		}
 		return
 	}
@@ -400,13 +436,13 @@ func (t *Server) handleSubscribe(id string, msg subscribeMsg) {
 	}
 	t.subscriptions[uri].add(id)
 	if debug {
-		log.Printf("turnpike: client %s subscribed to topic: %s", id, uri)
+		log.Info("turnpike: client subscribed to topic:", id, uri)
 	}
 }
 
 func (t *Server) handleUnsubscribe(id string, msg unsubscribeMsg) {
 	if debug {
-		log.Print("turnpike: handling unsubscribe message")
+		log.Info("turnpike: handling unsubscribe message")
 	}
 	t.subLock.Lock()
 	uri := checkCurie(t.prefixes[id], msg.TopicURI)
@@ -415,13 +451,13 @@ func (t *Server) handleUnsubscribe(id string, msg unsubscribeMsg) {
 	}
 	t.subLock.Unlock()
 	if debug {
-		log.Printf("turnpike: client %s unsubscribed from topic: %s", id, uri)
+		log.Info("turnpike: client unsubscribed from topic:", id, uri)
 	}
 }
 
 func (t *Server) handlePublish(id string, msg publishMsg) {
 	if debug {
-		log.Print("turnpike: handling publish message")
+		log.Info("turnpike: handling publish message")
 	}
 	uri := checkCurie(t.prefixes[id], msg.TopicURI)
 
@@ -439,7 +475,7 @@ func (t *Server) handlePublish(id string, msg publishMsg) {
 	out, err := createEvent(uri, event)
 	if err != nil {
 		if debug {
-			log.Printf("turnpike: error creating event message: %s", err)
+			log.Info("turnpike: error creating event message:", err.Error())
 		}
 		return
 	}
@@ -526,12 +562,12 @@ func (lm listenerMap) remove(id string) {
 	delete(lm, id)
 }
 
-func checkWAMPHandshake(config *websocket.Config, req *http.Request) error {
-	for _, protocol := range config.Protocol {
-		if protocol == "wamp" {
-			config.Protocol = []string{protocol}
-			return nil
-		}
-	}
-	return websocket.ErrBadWebSocketProtocol
-}
+//func checkWAMPHandshake(config *websocket.Config, req *http.Request) error {
+//	for _, protocol := range config.Protocol {
+//		if protocol == "wamp" {
+//			config.Protocol = []string{protocol}
+//			return nil
+//		}
+//	}
+//	return websocket.ErrBadWebSocketProtocol
+//}
