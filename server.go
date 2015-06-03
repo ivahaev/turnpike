@@ -370,7 +370,7 @@ func (t *Server) handlePrefix(id string, msg prefixMsg) {
 
 func (t *Server) handleCall(id string, msg callMsg) {
 	if debug {
-		log.Info("turnpike: handling call message")
+		log.Info("turnpike: handling call message", msg)
 	}
 
 	var out string
