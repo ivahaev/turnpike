@@ -7,10 +7,13 @@ package turnpike
 import (
 	"code.google.com/p/go.net/websocket"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/ivahaev/turnpike/uuid"
 	"io"
 	"log"
 	"math/rand"
+	"time"
 )
 
 const (
@@ -33,6 +36,8 @@ type Client struct {
 	eventHandlers       map[string]EventHandler
 	calls               map[string]chan CallResult
 	sessionOpenCallback func(string)
+	heartbeatChan       chan int
+	heartbeatHandlers   map[int]func(*Client, int)
 }
 
 // CallResult represents either a sucess or a failure after a RPC call.
@@ -48,12 +53,17 @@ type CallResult struct {
 type EventHandler func(topicURI string, event interface{})
 
 // NewClient creates a new WAMP client.
-func NewClient() *Client {
+func NewClient(args ...bool) *Client {
+	if len(args) > 0 {
+		debug = args[0]
+	}
 	return &Client{
-		messages:      make(chan string, clientBacklog),
-		prefixes:      make(prefixMap),
-		eventHandlers: make(map[string]EventHandler),
-		calls:         make(map[string]chan CallResult),
+		messages:          make(chan string, clientBacklog),
+		prefixes:          make(prefixMap),
+		eventHandlers:     make(map[string]EventHandler),
+		calls:             make(map[string]chan CallResult),
+		heartbeatChan:     make(chan int, 6),
+		heartbeatHandlers: make(map[int]func(*Client, int)),
 	}
 }
 
@@ -89,7 +99,7 @@ func (c *Client) Call(procURI string, args ...interface{}) chan CallResult {
 	}
 	// Channel size must be 1 to avoid blocking if no one is receiving the channel later.
 	resultCh := make(chan CallResult, 1)
-	callId := newId(16)
+	callId := uuid.NewV4()
 	msg, err := createCall(callId, procURI, args...)
 	if err != nil {
 		r := CallResult{
@@ -218,6 +228,19 @@ func (c *Client) handleEvent(msg eventMsg) {
 	}
 }
 
+func (c *Client) handleHearbeatEvent(msg []int) {
+	if debug {
+		log.Print("turnpike: handling heartbeat message", msg)
+	}
+	if f, ok := c.heartbeatHandlers[msg[1]]; ok && f != nil {
+		f(c, msg[1])
+	} else {
+		if debug {
+			log.Printf("turnpike: missing heartbeat handler for %s", msg)
+		}
+	}
+}
+
 func (c *Client) receiveWelcome() error {
 	if debug {
 		log.Print("turnpike: receive welcome")
@@ -308,6 +331,19 @@ func (c *Client) receive() {
 			if debug {
 				log.Print("turnpike: received extraneous welcome message, ignored")
 			}
+		case msgHeartbeat:
+			if debug {
+				log.Printf("turnpike: received heartbeat message: %s", data)
+			}
+			var msg []int
+			err := json.Unmarshal(data, &msg)
+			if err != nil || len(msg) < 2 {
+				if debug {
+					log.Printf("turnpike: error unmarshalling heartbeat message: %s", err)
+				}
+				continue
+			}
+			c.handleHearbeatEvent(msg)
 		default:
 			if debug {
 				log.Printf("turnpike: invalid message format, message dropped: %s", data)
@@ -327,6 +363,51 @@ func (c *Client) send() {
 			}
 		}
 	}
+}
+
+func (c *Client) SendingHeartbeat() chan error {
+	if debug {
+		log.Print("turnpike: sending call")
+	}
+	// Channel size must be 1 to avoid blocking if no one is receiving the channel later.
+	resultCh := make(chan error, 1)
+	hbCount := 0
+	hbLimit := 2
+	hbSender := func() {
+		for {
+			if hbCount >= hbLimit {
+				c.heartbeatChan <- hbLimit + 1
+				break
+			}
+			var data []interface{}
+			data = append(data, msgHeartbeat, hbCount)
+			b, err := json.Marshal(data)
+			if err != nil {
+				resultCh <- err
+			}
+			c.heartbeatHandlers[hbCount] = func(c *Client, count int) {
+				c.heartbeatChan <- count
+			}
+			hbCount++
+			c.messages <- string(b)
+			time.Sleep(time.Second * 5)
+		}
+		resultCh <- errors.New("turnpike: disconnected")
+	}
+	hbReciever := func() {
+		for m := range c.heartbeatChan {
+			if m > hbLimit {
+				return
+			} else {
+				hbCount = 0
+				c.heartbeatHandlers = make(map[int]func(*Client, int))
+			}
+		}
+	}
+
+	go hbSender()
+	go hbReciever()
+	return resultCh
 }
 
 // Connect will connect to server with an optional origin.
