@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 const (
@@ -26,7 +27,11 @@ const (
 	msgHeartbeat = 20
 )
 
-const wampProtocolVersion = 1
+const (
+	wampProtocolVersion = 1
+	hbLimit = 5
+	hbTimeout = time.Second * 5
+)
 
 var (
 	typeReg = regexp.MustCompile("^\\s*\\[\\s*(\\d+)\\s*,")
@@ -134,7 +139,7 @@ func (msg *prefixMsg) UnmarshalJSON(jsonData []byte) error {
 
 // Prefix returns a json encoded WAMP 'PREFIX' message as a byte slice
 func createPrefix(prefix, URI string) (string, error) {
-	if _, err := url.ParseRequestURI(URI); err != nil {
+	if _, err := url.Parse(URI); err != nil {
 		return "", &WAMPError{"invalid URI: " + URI}
 	}
 	return createWAMPMessage(msgPrefix, prefix, URI)
@@ -173,7 +178,7 @@ func (msg *callMsg) UnmarshalJSON(jsonData []byte) error {
 // callID must be a randomly generated string, procURI is the URI of the remote
 // procedure to be called, followed by zero or more call arguments
 func createCall(callID, procURI string, args ...interface{}) (string, error) {
-	if _, err := url.ParseRequestURI(procURI); err != nil {
+	if _, err := url.Parse(procURI); err != nil {
 		return "", &WAMPError{"invalid URI: " + procURI}
 	}
 	var data []interface{}

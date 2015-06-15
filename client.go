@@ -109,6 +109,7 @@ func (c *Client) Call(procURI string, args ...interface{}) chan CallResult {
 		resultCh <- r
 		return resultCh
 	}
+	log.Print("turnpike: sending call!!!!!!!!!!!!!!!", c)
 	c.calls[callId] = resultCh
 	c.messages <- string(msg)
 	return resultCh
@@ -191,6 +192,54 @@ func (c *Client) handleCallResult(msg callResultMsg) {
 		Error:  nil,
 	}
 	resultCh <- r
+}
+
+func (c *Client) SendingHeartbeat() chan error {
+	if debug {
+		log.Print("turnpike: sending call")
+	}
+	// Channel size must be 1 to avoid blocking if no one is receiving the channel later.
+	resultCh := make(chan error, 1)
+	stopChan := make(chan bool, 1)
+	hbCount := 0
+	hbCounter := 0
+	hbSender := func() {
+		for {
+			if hbCounter >= hbLimit {
+				stopChan <- true
+				break
+			}
+			var data []interface{}
+			data = append(data, msgHeartbeat, hbCount)
+			b, err := json.Marshal(data)
+			if err != nil {
+				resultCh <- err
+			}
+			c.heartbeatHandlers[hbCount] = func(c *Client, count int) {
+				c.heartbeatChan <- count
+			}
+			hbCount++
+			hbCounter++
+			c.messages <- string(b)
+			time.Sleep(hbTimeout)
+		}
+		resultCh <- errors.New("turnpike: disconnected")
+	}
+	hbReciever := func() {
+		for {
+			select {
+			case m := <- c.heartbeatChan:
+				hbCounter = 0
+				delete(c.heartbeatHandlers, m)
+			case <- stopChan:
+				return
+			}
+		}
+	}
+
+	go hbSender()
+	go hbReciever()
+	return resultCh
 }
 
 func (c *Client) handleCallError(msg callErrorMsg) {
@@ -363,51 +412,6 @@ func (c *Client) send() {
 			}
 		}
 	}
-}
-
-func (c *Client) SendingHeartbeat() chan error {
-	if debug {
-		log.Print("turnpike: sending call")
-	}
-	// Channel size must be 1 to avoid blocking if no one is receiving the channel later.
-	resultCh := make(chan error, 1)
-	hbCount := 0
-	hbLimit := 2
-	hbSender := func() {
-		for {
-			if hbCount >= hbLimit {
-				c.heartbeatChan <- hbLimit + 1
-				break
-			}
-			var data []interface{}
-			data = append(data, msgHeartbeat, hbCount)
-			b, err := json.Marshal(data)
-			if err != nil {
-				resultCh <- err
-			}
-			c.heartbeatHandlers[hbCount] = func(c *Client, count int) {
-				c.heartbeatChan <- count
-			}
-			hbCount++
-			c.messages <- string(b)
-			time.Sleep(time.Second * 5)
-		}
-		resultCh <- errors.New("turnpike: disconnected")
-	}
-	hbReciever := func() {
-		for m := range c.heartbeatChan {
-			if m > hbLimit {
-				return
-			} else {
-				hbCount = 0
-				c.heartbeatHandlers = make(map[int]func(*Client, int))
-			}
-		}
-	}
-
-	go hbSender()
-	go hbReciever()
-	return resultCh
 }
 
 // Connect will connect to server with an optional origin.
