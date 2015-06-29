@@ -109,7 +109,6 @@ func (c *Client) Call(procURI string, args ...interface{}) chan CallResult {
 		resultCh <- r
 		return resultCh
 	}
-	log.Print("turnpike: sending call!!!!!!!!!!!!!!!", c)
 	c.calls[callId] = resultCh
 	c.messages <- string(msg)
 	return resultCh
