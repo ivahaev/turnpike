@@ -12,12 +12,13 @@ import (
 	"github.com/nu7hatch/gouuid"
 	"io"
 	"net"
+	"regexp"
 	"sync"
 	"time"
 )
 
 var (
-	// The amount of messages to buffer before sending to client.
+// The amount of messages to buffer before sending to client.
 	serverBacklog = 20
 )
 
@@ -33,9 +34,10 @@ type Server struct {
 	// Client ID -> prefix mapping
 	prefixes map[string]prefixMap
 	// Proc URI -> handler
-	rpcHandlers map[string]RPCHandler
-	subHandlers map[string]SubHandler
-	pubHandlers map[string]PubHandler
+	rpcHandlers    map[string]RPCHandler
+	rgxRpcHandlers map[string]RgxRPCHandler
+	subHandlers    map[string]SubHandler
+	pubHandlers    map[string]PubHandler
 	// Topic URI -> subscribed clients
 	subscriptions        map[string]listenerMap
 	subLock              *sync.Mutex
@@ -49,6 +51,11 @@ type Server struct {
 // can be marshaled to JSON, or a error (preferably RPCError but any error works.)
 // NOTE: this may be broken in v2 if multiple-return is implemented
 type RPCHandler func(clientID string, topicURI string, args ...interface{}) (interface{}, error)
+
+type RgxRPCHandler struct {
+	Rgx     *regexp.Regexp
+	Handler RPCHandler
+}
 
 // RPCError represents a call error and is the recommended way to return an
 // error from a RPC handler.
@@ -77,13 +84,14 @@ type PubHandler func(topicURI string, event interface{}) interface{}
 // Can receive bool params for debug. If true, will log debug messages.
 func NewServer(d ...bool) *Server {
 	s := &Server{
-		clients:       make(map[string]chan string),
-		prefixes:      make(map[string]prefixMap),
-		rpcHandlers:   make(map[string]RPCHandler),
-		subHandlers:   make(map[string]SubHandler),
-		pubHandlers:   make(map[string]PubHandler),
-		subscriptions: make(map[string]listenerMap),
-		subLock:       new(sync.Mutex),
+		clients:        make(map[string]chan string),
+		prefixes:       make(map[string]prefixMap),
+		rpcHandlers:    make(map[string]RPCHandler),
+		rgxRpcHandlers: make(map[string]RgxRPCHandler),
+		subHandlers:    make(map[string]SubHandler),
+		pubHandlers:    make(map[string]PubHandler),
+		subscriptions:  make(map[string]listenerMap),
+		subLock:        new(sync.Mutex),
 	}
 	if len(d) > 0 {
 		debug = d[0]
@@ -111,9 +119,21 @@ func (t *Server) RegisterRPC(uri string, f RPCHandler) {
 	}
 }
 
+// RegisterRgxRPC adds a handler for the RPC in regexp uri.
+func (t *Server) RegisterRgxRPC(rgx *regexp.Regexp, f RPCHandler) {
+	if f != nil {
+		t.rgxRpcHandlers[rgx.String()] = RgxRPCHandler{rgx, f}
+	}
+}
+
 // UnregisterRPC removes a handler for the RPC named uri.
 func (t *Server) UnregisterRPC(uri string) {
 	delete(t.rpcHandlers, uri)
+}
+
+// UnregisterRgxRPC removes a handler for the RPC in regexp uri.
+func (t *Server) UnregisterRgxRPC(rgx *regexp.Regexp) {
+	delete(t.rgxRpcHandlers, rgx.String())
 }
 
 // RegisterSubHandler adds a handler called when a client subscribes to URI.
@@ -207,25 +227,30 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 	}
 	failures := 0
 	go func() {
-		for msg := range c {
-			if debug {
-				log.Info("turnpike: sending message:", msg)
-			}
-			conn.SetWriteDeadline(time.Now().Add(clientConnTimeout * time.Second))
-			err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
-			if err != nil {
-				if nErr, ok := err.(net.Error); ok && (nErr.Timeout() || nErr.Temporary()) {
-					log.Info("Network error:", nErr.Error())
-					failures++
-					if failures > clientMaxFailures {
-						break
-					}
-				} else {
-					if debug {
-						log.Info("turnpike: error sending message:", err.Error())
-					}
-					break
+		Loop:
+		for {
+			select {
+			case msg := <-c:
+				if debug {
+					log.Info("turnpike: sending message:", msg)
 				}
+				conn.SetWriteDeadline(time.Now().Add(clientConnTimeout * time.Second))
+				err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
+				if err != nil {
+					if nErr, ok := err.(net.Error); ok && (nErr.Timeout() || nErr.Temporary()) {
+						log.Info("Network error:", nErr.Error())
+						failures++
+						if failures > clientMaxFailures {
+							break Loop
+						}
+					} else {
+						if debug {
+							log.Info("turnpike: error sending message:", err.Error())
+						}
+						break Loop
+					}
+				}
+
 			}
 		}
 		if debug {
@@ -400,10 +425,41 @@ func (t *Server) handleCall(id string, msg callMsg) {
 			out, err = createCallResult(msg.CallID, res)
 		}
 	} else {
-		if debug {
-			log.Info("turnpike: RPC call not registered:", msg.ProcURI)
+		var found bool
+		for _, rgxHandler := range t.rgxRpcHandlers {
+			if rgxHandler.Rgx.MatchString(msg.ProcURI) {
+				found = true
+				var res interface{}
+				res, err = rgxHandler.Handler(id, msg.ProcURI, msg.CallArgs...)
+				if err != nil {
+					var errorURI, desc string
+					var details interface{}
+					if er, ok := err.(RPCError); ok {
+						errorURI = er.URI
+						desc = er.Description
+						details = er.Details
+					} else {
+						errorURI = msg.ProcURI + "#generic-error"
+						desc = err.Error()
+					}
+
+					if details != nil {
+						out, err = createCallError(msg.CallID, errorURI, desc, details)
+					} else {
+						out, err = createCallError(msg.CallID, errorURI, desc)
+					}
+				} else {
+					out, err = createCallResult(msg.CallID, res)
+				}
+				break
+			}
 		}
-		out, err = createCallError(msg.CallID, "error:notimplemented", "RPC call not implemented", msg.ProcURI)
+		if !found {
+			if debug {
+				log.Info("turnpike: RPC call not registered:", msg.ProcURI)
+			}
+			out, err = createCallError(msg.CallID, "error:notimplemented", "RPC call not implemented", msg.ProcURI)
+		}
 	}
 
 	if err != nil {
