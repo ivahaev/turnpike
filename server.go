@@ -575,29 +575,35 @@ func (t *Server) handlePublish(id string, msg publishMsg) {
 	var sendTo []string
 	if len(msg.ExcludeList) > 0 || len(msg.EligibleList) > 0 {
 		// this is super ugly, but I couldn't think of a better way...
-		for tid := range lm {
-			include := true
-			for _, _tid := range msg.ExcludeList {
-				if tid == _tid {
-					include = false
+		_sendTo := []string{}
+		if len(msg.EligibleList) == 0 {
+			for _tid := range lm {
+				_sendTo = append(_sendTo, _tid)
+			}
+		}
+		for _, tid := range msg.EligibleList {
+			for _tid := range lm {
+				if _tid == tid {
+					_sendTo = append(_sendTo, tid)
 					break
 				}
-			}
-			if include {
-				sendTo = append(sendTo, tid)
 			}
 		}
 
-		for _, tid := range msg.EligibleList {
-			include := true
-			for _, _tid := range sendTo {
-				if _tid == tid {
-					include = false
-					break
+		if len(msg.ExcludeList) == 0 {
+			sendTo = _sendTo
+		} else {
+			for _, tid := range _sendTo {
+				var exclude bool
+				for _, _tid := range msg.ExcludeList {
+					if tid == _tid {
+						exclude = true
+						break
+					}
 				}
-			}
-			if include {
-				sendTo = append(sendTo, tid)
+				if !exclude {
+					sendTo = append(sendTo, tid)
+				}
 			}
 		}
 	} else {
