@@ -18,7 +18,7 @@ import (
 )
 
 var (
-// The amount of messages to buffer before sending to client.
+	// The amount of messages to buffer before sending to client.
 	serverBacklog = 20
 )
 
@@ -159,16 +159,39 @@ func (t *Server) RegisterPubHandler(uri string, f PubHandler) {
 	}
 }
 
+// Subscribers returns a slice of the ids of all subscribed to uri clients
+func (t *Server) Subscribers(uri string) []string {
+	clientIDs := []string{}
+	lm, ok := t.subscriptions[uri]
+	if !ok {
+		return clientIDs
+	}
+	for id, _ := range lm {
+		clientIDs = append(clientIDs, id)
+	}
+	return clientIDs
+}
+
 // UnregisterPubHandler removes a publish handler for the URI.
 func (t *Server) UnregisterPubHandler(uri string) {
 	delete(t.pubHandlers, uri)
 }
 
 // SendEvent sends an event with topic directly (not via Client.Publish())
-func (t *Server) SendEvent(topic string, event interface{}) {
+func (t *Server) SendEvent(topic string, event interface{}, ids ...[]string) {
+	var eligibleList = []string{}
+	var excludeList = []string{}
+	if len(ids) > 0 && ids[0] != nil {
+		eligibleList = ids[0]
+	}
+	if len(ids) > 1 && ids[1] != nil {
+		excludeList = ids[1]
+	}
 	t.handlePublish(topic, publishMsg{
-		TopicURI: topic,
-		Event:    event,
+		TopicURI:     topic,
+		Event:        event,
+		EligibleList: eligibleList,
+		ExcludeList:  excludeList,
 	})
 }
 
@@ -227,7 +250,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 	}
 	failures := 0
 	go func() {
-		Loop:
+	Loop:
 		for {
 			select {
 			case msg := <-c:
@@ -485,6 +508,11 @@ func (t *Server) handleSubscribe(id string, msg subscribeMsg) {
 		if debug {
 			log.Info("turnpike: client denied subscription of topic:", id, uri)
 		}
+		if out, err := createWAMPMessage(msgSubscribeError, msg.TopicURI); err == nil {
+			if client, ok := t.clients[id]; ok {
+				client <- out
+			}
+		}
 		return
 	}
 
@@ -496,6 +524,11 @@ func (t *Server) handleSubscribe(id string, msg subscribeMsg) {
 	t.subscriptions[uri].add(id)
 	if debug {
 		log.Info("turnpike: client subscribed to topic:", id, uri)
+	}
+	if out, err := createWAMPMessage(msgSubscribed, msg.TopicURI); err == nil {
+		if client, ok := t.clients[id]; ok {
+			client <- out
+		}
 	}
 }
 
