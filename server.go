@@ -29,20 +29,17 @@ const (
 
 // Server represents a WAMP server that handles RPC and pub/sub.
 type Server struct {
-	// Client ID -> send channel
-	clients map[string]chan string
-	// Client ID -> prefix mapping
-	prefixes map[string]prefixMap
-	// Proc URI -> handler
-	rpcHandlers    map[string]RPCHandler
-	rgxRpcHandlers map[string]RgxRPCHandler
-	subHandlers    map[string]SubHandler
-	pubHandlers    map[string]PubHandler
-	// Topic URI -> subscribed clients
+	clients              map[string]chan string
+	prefixes             map[string]prefixMap
+	rpcHandlers          map[string]RPCHandler
+	rgxRpcHandlers       map[string]RgxRPCHandler
+	subHandlers          map[string]SubHandler
+	pubHandlers          map[string]PubHandler
 	subscriptions        map[string]listenerMap
 	subLock              *sync.Mutex
 	sessionOpenCallback  func(string, interface{})
 	sessionCloseCallback func(string)
+	disconnectChannels   map[string]chan bool
 }
 
 // RPCHandler is an interface that handlers to RPC calls should implement.
@@ -84,19 +81,31 @@ type PubHandler func(topicURI string, event interface{}) interface{}
 // Can receive bool params for debug. If true, will log debug messages.
 func NewServer(d ...bool) *Server {
 	s := &Server{
-		clients:        make(map[string]chan string),
-		prefixes:       make(map[string]prefixMap),
-		rpcHandlers:    make(map[string]RPCHandler),
-		rgxRpcHandlers: make(map[string]RgxRPCHandler),
-		subHandlers:    make(map[string]SubHandler),
-		pubHandlers:    make(map[string]PubHandler),
-		subscriptions:  make(map[string]listenerMap),
-		subLock:        new(sync.Mutex),
+		clients:            make(map[string]chan string),
+		prefixes:           make(map[string]prefixMap),
+		rpcHandlers:        make(map[string]RPCHandler),
+		rgxRpcHandlers:     make(map[string]RgxRPCHandler),
+		subHandlers:        make(map[string]SubHandler),
+		pubHandlers:        make(map[string]PubHandler),
+		subscriptions:      make(map[string]listenerMap),
+		subLock:            new(sync.Mutex),
+		disconnectChannels: make(map[string]chan bool),
 	}
 	if len(d) > 0 {
 		debug = d[0]
 	}
 	return s
+}
+
+// SetSessionCloseCallback adds a callback function that is run when a session ends.
+// The callback function must accept a string argument that is the session ID.
+func (t *Server) DisconnectClient(client string) {
+	log.Debug("Disconnect request", client)
+	ch, ok := t.disconnectChannels[client]
+	if !ok {
+		log.Error("Can't find client", client)
+	}
+	ch <- true
 }
 
 // SetSessionCloseCallback adds a callback function that is run when a session ends.
@@ -224,6 +233,8 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 		log.Info("turnpike: client connected:", id)
 	}
 
+	t.disconnectChannels[id] = make(chan bool)
+
 	arr, err := createWelcome(id, turnpikeServerIdent)
 	if err != nil {
 		if debug {
@@ -274,6 +285,11 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 					}
 				}
 
+			case <-t.disconnectChannels[id]:
+				if debug {
+					log.Info("Need to disconnect wamp connection")
+				}
+				break Loop
 			}
 		}
 		if debug {

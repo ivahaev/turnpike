@@ -1,4 +1,5 @@
 // Copyright (c) 2013 Joshua Elliott
+// 2015 ivahaev
 // Released under the MIT License
 // http://opensource.org/licenses/MIT
 
@@ -10,7 +11,7 @@ import (
 )
 
 const (
-    turnpikeVersion = "0.2.1"
+    turnpikeVersion = "0.2.2"
     turnpikeServerIdent = "turnpike-" + turnpikeVersion
 )
 
