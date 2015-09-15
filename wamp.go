@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"strings"
 )
 
 const (
@@ -215,6 +216,13 @@ func (msg *callResultMsg) UnmarshalJSON(jsonData []byte) error {
 // CallResult returns a json encoded WAMP 'CALLRESULT' message as a byte slice
 // callID is the randomly generated string provided by the client
 func createCallResult(callID string, result interface{}) (string, error) {
+	switch result.(type) {
+	case string:
+		r := result.(string)
+		if (strings.HasPrefix(r, "{") && strings.HasSuffix(r, "}")) || (strings.HasPrefix(r, "[") && strings.HasSuffix(r, "[")) {
+			return createWAMPMessagefromStrings("3", `"` + callID + `"`, r)
+		}
+	}
 	return createWAMPMessage(msgCallResult, callID, result)
 }
 
@@ -414,7 +422,18 @@ func (msg *eventMsg) UnmarshalJSON(jsonData []byte) error {
 // Event returns a json encoded WAMP 'EVENT' message as a byte slice
 // event can be nil, a simple json type, or a complex json type
 func createEvent(topicURI string, event interface{}) (string, error) {
+	switch event.(type) {
+	case string:
+		e := event.(string)
+		if (strings.HasPrefix(e, "{") && strings.HasSuffix(e, "}")) || (strings.HasPrefix(e, "[") && strings.HasSuffix(e, "[")) {
+			return createWAMPMessagePubSubFromStrings("8", `"` + topicURI + `"`, e)
+		}
+	}
 	return createWAMPMessagePubSub(msgEvent, topicURI, event)
+}
+
+func createEventFromString(topicURI string, event string) (string, error) {
+	return createWAMPMessagePubSubFromStrings("8", topicURI, event)
 }
 
 // Event returns a json encoded WAMP 'HEARTBEAT' message as a byte slice
@@ -425,6 +444,13 @@ func createHeartbeatEvent(counter int) (string, error) {
 
 // createWAMPMessagePubSub checks that the second argument (topicURI) is a valid
 // URI and then passes the request on to createWAMPMessage
+func createWAMPMessagePubSubFromStrings(args ...string) (string, error) {
+	if _, err := url.Parse(args[1]); err != nil {
+		return "", &WAMPError{"invalid URI: " + args[1]}
+	}
+	return createWAMPMessagefromStrings(args...)
+}
+
 func createWAMPMessagePubSub(args ...interface{}) (string, error) {
 	if _, err := url.Parse(args[1].(string)); err != nil {
 		return "", &WAMPError{"invalid URI: " + args[1].(string)}
@@ -438,4 +464,10 @@ func createWAMPMessage(args ...interface{}) (string, error) {
 	data = append(data, args...)
 	b, err := json.Marshal(data)
 	return string(b), err
+}
+
+// createWAMPMessageNoMarshal returns a JSON encoded list from all string arguments passed to it
+func createWAMPMessagefromStrings(args ...string) (string, error) {
+	argsString := strings.Join(args, ",")
+	return "[" + argsString + "]", nil
 }
