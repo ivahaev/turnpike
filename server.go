@@ -7,7 +7,7 @@ package turnpike
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
+	"golang.org/x/net/websocket"
 	log "github.com/ivahaev/go-logger"
 	"github.com/nu7hatch/gouuid"
 	"io"
@@ -245,7 +245,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 	if debug {
 		log.Info("turnpike: sending welcome message:", arr)
 	}
-	err = conn.WriteMessage(websocket.TextMessage, []byte(arr))
+	err = websocket.Message.Send(conn, string(arr))
 	if err != nil {
 		if debug {
 			log.Info("turnpike: error sending welcome message, aborting connection:", err)
@@ -269,7 +269,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 					log.Info("turnpike: sending message:", msg)
 				}
 				conn.SetWriteDeadline(time.Now().Add(clientConnTimeout * time.Second))
-				err := conn.WriteMessage(websocket.TextMessage, []byte(msg))
+				err := websocket.Message.Send(conn, msg)
 				if err != nil {
 					if nErr, ok := err.(net.Error); ok && (nErr.Timeout() || nErr.Temporary()) {
 						log.Info("Network error:", nErr.Error())
@@ -300,7 +300,7 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 
 	for {
 		var rec string
-		_, msg, err := conn.ReadMessage()
+		err := websocket.Message.Receive(conn, &rec)
 		if err != nil {
 			if err != io.EOF {
 				if debug {
@@ -312,7 +312,6 @@ func (t *Server) HandleWebsocket(conn *websocket.Conn, additionalData interface{
 		if debug {
 			log.Info("turnpike: message received:", rec)
 		}
-		rec = string(msg)
 
 		data := []byte(rec)
 
